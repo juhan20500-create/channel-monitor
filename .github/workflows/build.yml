@@ -1,0 +1,63 @@
+name: build
+
+# 태그(v1.0 등)를 push하면 윈도우/맥 실행파일을 빌드해 Release에 첨부한다.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:   # 수동 실행 버튼도 허용
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: channel-monitor-windows.exe
+            pyinstaller_name: channel-monitor
+          - os: macos-latest
+            artifact: channel-monitor-macos
+            pyinstaller_name: channel-monitor
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install flask pyinstaller
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        run: pyinstaller --onefile --name channel-monitor chanmon_app.py
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: pyinstaller --onefile --name channel-monitor chanmon_app.py
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv dist/channel-monitor.exe "dist/${{ matrix.artifact }}"
+          else
+            mv dist/channel-monitor "dist/${{ matrix.artifact }}"
+          fi
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}

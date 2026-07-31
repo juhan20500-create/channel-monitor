@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# 빌드 부산물
+build/
+dist/
+*.spec

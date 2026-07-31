@@ -2,15 +2,58 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import traceback
+import urllib.request
 import webbrowser
-from threading import Timer
+from threading import Thread, Timer
 
 from flask import Flask, request, jsonify, Response
 
 PORT = int(os.environ.get("CHANMON_PORT", "5054"))
 YT_DLP_PATH = os.environ.get("YT_DLP_PATH", "yt-dlp")
+
+
+def _data_dir():
+    """OS별 사용자 쓰기 가능한 앱 데이터 폴더."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.path.expanduser("~/.local/share")
+    d = os.path.join(base, "channel-monitor")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def ensure_ytdlp():
+    """yt-dlp를 확보한다. PATH에 있으면 그걸 쓰고, 없으면 최신 실행파일을 내려받는다."""
+    if os.environ.get("YT_DLP_PATH"):
+        return os.environ["YT_DLP_PATH"]
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    name = ("yt-dlp.exe" if sys.platform == "win32"
+            else "yt-dlp_macos" if sys.platform == "darwin" else "yt-dlp")
+    local = os.path.join(_data_dir(), name)
+    if not os.path.exists(local):
+        print("yt-dlp를 처음 한 번 내려받는 중… (약 30MB, 잠시 기다려 주세요)")
+        url = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{name}"
+        urllib.request.urlretrieve(url, local)
+        if sys.platform != "win32":
+            os.chmod(local, 0o755)
+        print("yt-dlp 준비 완료.")
+    return local
+
+
+def _update_ytdlp_bg(path):
+    """백그라운드에서 yt-dlp 자체 업데이트(-U). 실패해도 무시."""
+    try:
+        subprocess.run([path, "-U"], capture_output=True, timeout=60)
+    except Exception:
+        pass
 # 쿠키는 선택 사항. 로그인 상태를 쓰고 싶을 때만 환경변수로 브라우저를 지정한다.
 #   예) 맥/윈도우 공통:  YTDLP_COOKIES_BROWSER="chrome"
 #       특정 프로필:      YTDLP_COOKIES_BROWSER="chrome:Profile 2"
@@ -671,8 +714,11 @@ def _pick_port(start):
 
 
 if __name__ == "__main__":
-    if shutil.which(YT_DLP_PATH) is None:
-        print("[오류] yt-dlp를 찾을 수 없습니다. README의 설치 안내를 참고하세요.")
+    try:
+        YT_DLP_PATH = ensure_ytdlp()
+        Thread(target=_update_ytdlp_bg, args=(YT_DLP_PATH,), daemon=True).start()
+    except Exception as e:
+        print(f"[오류] yt-dlp 준비 실패: {e}\n인터넷 연결을 확인하고 다시 실행하세요.")
     port = _pick_port(PORT)
     Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     print(f"채널 모니터 실행 중 → http://127.0.0.1:{port}  (종료: Ctrl+C)")
