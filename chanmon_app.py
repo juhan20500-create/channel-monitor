@@ -1,64 +1,17 @@
 import json
 import os
-import shutil
 import subprocess
-import sys
 import time
 import traceback
-import urllib.request
 import webbrowser
-from threading import Thread, Timer
+from threading import Timer
 
 from flask import Flask, request, jsonify, Response
 
-PORT = int(os.environ.get("CHANMON_PORT", "5054"))
-YT_DLP_PATH = os.environ.get("YT_DLP_PATH", "yt-dlp")
-
-
-def _data_dir():
-    """OS별 사용자 쓰기 가능한 앱 데이터 폴더."""
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.path.expanduser("~/.local/share")
-    d = os.path.join(base, "channel-monitor")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def ensure_ytdlp():
-    """yt-dlp를 확보한다. PATH에 있으면 그걸 쓰고, 없으면 최신 실행파일을 내려받는다."""
-    if os.environ.get("YT_DLP_PATH"):
-        return os.environ["YT_DLP_PATH"]
-    found = shutil.which("yt-dlp")
-    if found:
-        return found
-    name = ("yt-dlp.exe" if sys.platform == "win32"
-            else "yt-dlp_macos" if sys.platform == "darwin" else "yt-dlp")
-    local = os.path.join(_data_dir(), name)
-    if not os.path.exists(local):
-        print("yt-dlp를 처음 한 번 내려받는 중… (약 30MB, 잠시 기다려 주세요)")
-        url = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{name}"
-        urllib.request.urlretrieve(url, local)
-        if sys.platform != "win32":
-            os.chmod(local, 0o755)
-        print("yt-dlp 준비 완료.")
-    return local
-
-
-def _update_ytdlp_bg(path):
-    """백그라운드에서 yt-dlp 자체 업데이트(-U). 실패해도 무시."""
-    try:
-        subprocess.run([path, "-U"], capture_output=True, timeout=60)
-    except Exception:
-        pass
-# 쿠키는 선택 사항. 로그인 상태를 쓰고 싶을 때만 환경변수로 브라우저를 지정한다.
-#   예) 맥/윈도우 공통:  YTDLP_COOKIES_BROWSER="chrome"
-#       특정 프로필:      YTDLP_COOKIES_BROWSER="chrome:Profile 2"
-# 미설정이면 쿠키 없이 동작한다(공개 채널 쇼츠 목록은 로그인 없이도 대부분 조회됨).
-COOKIES_BROWSER = os.environ.get("YTDLP_COOKIES_BROWSER", "").strip()
+PORT = 5054
+YT_DLP_PATH = "yt-dlp"
+CHROME_BROWSER = "chrome"
+CHROME_PROFILE = os.environ.get("YTDLP_CHROME_PROFILE", "Profile 2")
 PER_CHANNEL = 30         # 채널당 최근 쇼츠 표본 수 (조회수순 정렬해 인기순처럼 봄)
 MIN_VIEWS = 500_000      # 이 조회수 미만 쇼츠는 결과에서 제외
 FETCH_TIMEOUT = 60
@@ -71,16 +24,9 @@ error_log_path = os.path.join(base_dir, "error.log")
 app = Flask(__name__)
 
 # 처음 실행 시 미리 넣어둘 채널 핸들 (사용자 제공 목록에서 @/공백 정리·중복제거)
-SEED_RAW = (
-    "아쭈 이거어떻노 KPOPHMKShorts kpop_itzu coating-ae k챱챱 인물쇼츠팅 웃돌픽 loveRYU "
-    "tamjeongcat People_Shortsting 패션탐정냥 도도tv zapduck_99 마군입니다 아이돌멩이e "
-    "godofthunder76 SpinelCAM kpopidolzzz PopPickkk 30초인물소개 젠쫀쿠 귀여운아이브 "
-    "jennie_ping K-PopFlow 낭만헤드셋 별똥별이슈 담장너 waterpiamusic CCSTWICE "
-    "치얼업아시나요 아이돌_월드 IDOL탐정 콘텐쇼츠-d6p 데일리원영 쓱보숏 hypeDrp 덕칼럼 "
-    "4K-pop-x1p srjinxed 잠깐만아이돌 DaftTaengk 아쮸 아이돌팩트 입덕브리핑 NewShirt_ "
-    "셀럽온 한끼뮤직 myfavorite_news 우리바보아니야 베몬업 BlackpinkFanHub bbeogguk "
-    "kpop_reporter_daram DOL-uh9vn 두근두근좋아요 썰예능-h3r 아이돌캐치v 구독자5만명이목표"
-)
+# 처음 실행할 때 넣어 둘 채널. 비어 있으면 빈 목록으로 시작한다.
+# 쓰는 사람이 화면에서 직접 채널을 추가하면 lists.json 에 저장된다.
+SEED_RAW = ""
 
 
 def log_error(context):
@@ -95,7 +41,7 @@ def normalize_handle(name):
 
 
 lists_path = os.path.join(base_dir, "lists.json")
-DEFAULT_LIST_NAME = "한국 아이돌 쇼츠 목록"
+DEFAULT_LIST_NAME = "기본 목록"      # 처음 만들어지는 목록 이름. 화면에서 바꿀 수 있다.
 
 
 def _seed_channels():
@@ -146,10 +92,9 @@ def save_channels(channels):
 def fetch_channel(handle, limit=PER_CHANNEL):
     """채널의 쇼츠 탭에서 영상 메타데이터를 가져온다. limit=None이면 전체(역대)."""
     url = f"https://www.youtube.com/@{handle}/shorts"
-    cmd = [YT_DLP_PATH]
-    if COOKIES_BROWSER:  # 지정된 경우에만 브라우저 쿠키 사용
-        cmd += ["--cookies-from-browser", COOKIES_BROWSER]
-    cmd += [
+    cmd = [
+        YT_DLP_PATH,
+        "--cookies-from-browser", f"{CHROME_BROWSER}:{CHROME_PROFILE}",
         "--flat-playlist",
         "--dump-json",
         "--extractor-args", "youtubetab:skip=authcheck",
@@ -230,11 +175,14 @@ INDEX_HTML = r"""
   button.ghost{ background:var(--elev); color:var(--txt); border:1px solid var(--line); box-shadow:none; }
   select#depthSel{ background:var(--elev); border:1px solid var(--line); color:var(--txt);
     border-radius:var(--ctrl); padding:10px 12px; font-size:14px; cursor:pointer; }
-  #searchWrap{ flex:1; display:flex; justify-content:center; min-width:0; }
-  #searchInput{ background:var(--elev); border:1px solid var(--line); color:var(--txt);
+  #searchWrap{ flex:1; display:flex; justify-content:center; gap:8px; min-width:0; }
+  #searchInput,#excludeInput{ background:var(--elev); border:1px solid var(--line); color:var(--txt);
     border-radius:var(--ctrl); padding:10px 13px; font-size:14px; width:100%; max-width:340px;
     outline:none; transition:.15s; }
-  #searchInput:focus{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(124,92,255,.18); }
+  #searchInput:focus,#excludeInput:focus{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(124,92,255,.18); }
+  /* 제외는 걸러내는 칸이라 눈에 덜 띄게 두고, 값이 있을 때만 붉게 표시한다 */
+  #excludeInput{ max-width:260px; }
+  #excludeInput.on{ border-color:var(--danger); }
   .tabbtn{ background:var(--elev); color:var(--muted); border:1px solid var(--line); box-shadow:none; }
   .tabbtn.active{ background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; border-color:transparent; }
   .layout{ display:block; }
@@ -315,6 +263,7 @@ INDEX_HTML = r"""
     <span id="queueCount"></span>
     <span id="searchWrap">
       <input id="searchInput" placeholder="가져온 결과에서 검색 (제목 · 채널)" />
+      <input id="excludeInput" placeholder="제외할 단어 (쉼표로 여러 개)" />
     </span>
     <button class="tabbtn active" id="tabTop">전체 인기순</button>
     <button class="tabbtn" id="tabCompare">채널 비교표</button>
@@ -368,6 +317,7 @@ let data = { results: [] };   // [{channel, videos, error}]
 let tab = 'top';
 let compareSortKey = 'avg';
 let query = '';
+let exclude = localStorage.getItem('chanmon_exclude') || '';   // 제외 단어는 다음에도 그대로 쓴다
 
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtViews(v){
@@ -452,24 +402,30 @@ function updateQueueCount(n){
 }
 fetch('/queue').then(r=>r.json()).then(d=>updateQueueCount(d.count)).catch(()=>{});
 
-// 검색어로 걸러낸 결과. 빈 검색어면 원본 그대로.
+// 검색어로 걸러내고, 제외 단어가 든 영상은 빼낸다. 둘 다 비었으면 원본 그대로.
 function filteredResults(){
   const q = query.trim().toLowerCase();
-  if (!q) return data.results || [];
+  // 쉼표로 여러 개. "먹방, 광고" 처럼 쓴다.
+  const bad = exclude.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (!q && !bad.length) return data.results || [];
+  const hit = v => {
+    const t = (v.title||'').toLowerCase(), c = (v.channel||'').toLowerCase();
+    if (bad.some(w => t.includes(w) || c.includes(w))) return false;
+    return !q || t.includes(q) || c.includes(q);
+  };
   return (data.results || [])
-    .map(r => ({
-      ...r,
-      videos: (r.videos||[]).filter(v =>
-        (v.title||'').toLowerCase().includes(q) || (v.channel||'').toLowerCase().includes(q)),
-    }))
+    .map(r => ({ ...r, videos: (r.videos||[]).filter(hit) }))
     .filter(r => r.videos.length);
 }
 
 function render(){
   const results = filteredResults();
   if (!results.length){
-    viewEl.innerHTML = (query.trim() && (data.results||[]).length)
-      ? `<p class="sub2">"${escapeHtml(query.trim())}" 검색 결과 없음</p>` : '';
+    const has = (data.results||[]).length;
+    let msg = '';
+    if (has && query.trim()) msg = `"${escapeHtml(query.trim())}" 검색 결과 없음`;
+    else if (has && exclude.trim()) msg = '제외 단어로 모두 걸러졌습니다';
+    viewEl.innerHTML = msg ? `<p class="sub2">${msg}</p>` : '';
     return;
   }
 
@@ -530,6 +486,21 @@ const searchInput = document.getElementById('searchInput');
 searchInput.addEventListener('input', ()=>{ query = searchInput.value; render(); });
 searchInput.addEventListener('keydown', e=>{
   if(e.key === 'Escape'){ searchInput.value=''; query=''; render(); }
+});
+
+// 제외할 단어 — 쉼표로 여러 개. 껐다 켜도 남는다.
+const excludeInput = document.getElementById('excludeInput');
+function applyExclude(){
+  exclude = excludeInput.value;
+  localStorage.setItem('chanmon_exclude', exclude);
+  excludeInput.classList.toggle('on', !!exclude.trim());
+  render();
+}
+excludeInput.value = exclude;
+excludeInput.classList.toggle('on', !!exclude.trim());
+excludeInput.addEventListener('input', applyExclude);
+excludeInput.addEventListener('keydown', e=>{
+  if(e.key === 'Escape'){ excludeInput.value=''; applyExclude(); }
 });
 
 tabTop.onclick = ()=>setTab('top', tabTop);
@@ -604,8 +575,8 @@ def channels_route():
     return jsonify({"channels": chs})
 
 
-# 분석 대기열은 앱 폴더 안에 저장 (OS 무관, 별도 경로 설정 불필요)
-ANALYSIS_DIR = os.path.join(base_dir, "analysis")
+# 분석 대기열을 쌓아 두는 곳. 쓰는 사람마다 홈 폴더 아래에 생긴다.
+ANALYSIS_DIR = os.path.expanduser(os.environ.get("SHORTS_ANALYSIS_DIR", "~/shorts_analysis"))
 QUEUE_PATH = os.path.join(ANALYSIS_DIR, "queue.jsonl")
 
 
@@ -703,23 +674,6 @@ def fetch_stream():
     return Response(gen(), mimetype="application/x-ndjson")
 
 
-def _pick_port(start):
-    """포트가 이미 사용 중이면 다음 빈 포트를 찾는다."""
-    import socket
-    for port in range(start, start + 20):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
-                return port
-    return start
-
-
 if __name__ == "__main__":
-    try:
-        YT_DLP_PATH = ensure_ytdlp()
-        Thread(target=_update_ytdlp_bg, args=(YT_DLP_PATH,), daemon=True).start()
-    except Exception as e:
-        print(f"[오류] yt-dlp 준비 실패: {e}\n인터넷 연결을 확인하고 다시 실행하세요.")
-    port = _pick_port(PORT)
-    Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
-    print(f"채널 모니터 실행 중 → http://127.0.0.1:{port}  (종료: Ctrl+C)")
-    app.run(port=port, debug=False, threaded=True)
+    (None if os.environ.get("NO_BROWSER") else Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start())
+    app.run(port=PORT, debug=False, threaded=True)
