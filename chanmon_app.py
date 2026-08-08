@@ -217,6 +217,10 @@ INDEX_HTML = r"""
   #channels{ max-height:none; }
   .chip button{ background:none; color:var(--muted); border:none; cursor:pointer; font-size:14px; padding:0; box-shadow:none; }
   .chip button:hover{ color:var(--danger); }
+  /* 핸들이 잘못돼 가져오지 못한 채널 — 직접 고치도록 눈에 띄게 둔다 */
+  .chip.bad{ color:var(--danger); border-color:var(--danger);
+    background:rgba(255,107,107,.10); font-weight:600; }
+  #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
   #status{ color:var(--accent); font-size:14px; margin-bottom:16px; min-height:18px; font-weight:600; }
   .chanblock{ margin-bottom:30px; }
   .chanhead{ font-size:16px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; gap:10px; }
@@ -289,6 +293,7 @@ INDEX_HTML = r"""
       </div>
       <div id="chMsg" class="chmsg"></div>
       <div class="side-label">등록 채널</div>
+      <div id="badCount"></div>
       <div id="channels"></div>
     </aside>
     <main>
@@ -333,11 +338,32 @@ function fmtViews(v){
   return (v||0).toLocaleString();
 }
 
+// 가져오기에서 실패한 채널. 핸들이 틀렸을 가능성이 커서 빨갛게 표시한다.
+let badChannels = JSON.parse(localStorage.getItem('chanmon_bad') || '{}');
+
 function renderChannels() {
-  channelsEl.innerHTML = channels.map(c =>
-    `<span class="chip">${escapeHtml(c)}<button data-c="${escapeHtml(c)}">×</button></span>`
-  ).join('');
+  channelsEl.innerHTML = channels.map(c => {
+    const why = badChannels[c.toLowerCase()];
+    const cls = why ? 'chip bad' : 'chip';
+    const tip = why ? ` title="${escapeHtml(why)} — 핸들을 고쳐 주세요"` : '';
+    return `<span class="${cls}"${tip}>${escapeHtml(c)}<button data-c="${escapeHtml(c)}">×</button></span>`;
+  }).join('');
   channelsEl.querySelectorAll('button').forEach(b => b.onclick = () => removeChannel(b.dataset.c));
+  const n = channels.filter(c => badChannels[c.toLowerCase()]).length;
+  const warn = document.getElementById('badCount');
+  if (warn) warn.textContent = n ? `빨간 채널 ${n}개는 핸들이 잘못돼 가져오지 못했습니다` : '';
+}
+
+// 가져오기 결과를 보고 어느 채널이 잘못됐는지 기록한다.
+function markBadChannels(results){
+  (results || []).forEach(r => {
+    const k = (r.channel || '').toLowerCase();
+    if (!k) return;
+    if (r.error) badChannels[k] = r.error;
+    else delete badChannels[k];        // 이제 잘 되면 표시를 지운다
+  });
+  localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
+  renderChannels();
 }
 function loadChannels(){ fetch('/channels').then(r=>r.json()).then(d=>{channels=d.channels; renderChannels();}); }
 
@@ -565,7 +591,10 @@ fetchBtn.onclick = async ()=>{
       }
     }
     const ok = data.results.filter(r=>!r.error).length;
-    status.textContent = `완료 · 성공 ${ok}/${data.results.length}개 채널`;
+    const bad = data.results.length - ok;
+    status.textContent = `완료 · 성공 ${ok}/${data.results.length}개 채널`
+      + (bad ? ` · 실패 ${bad}개는 왼쪽에 빨갛게 표시됨` : '');
+    markBadChannels(data.results);   // 실패한 채널을 빨갛게
   } catch(err) {
     status.textContent = '오류: ' + err.message;
   } finally {
