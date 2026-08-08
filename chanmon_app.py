@@ -200,6 +200,12 @@ INDEX_HTML = r"""
   .listrow button{ padding:9px 11px; font-size:14px; }
   .addrow{ display:flex; gap:8px; margin-bottom:12px; }
   .addrow #chInput{ flex:1; width:auto; min-width:0; }
+  /* 채널 추가 결과 알림 */
+  .chmsg{ font-size:12.5px; line-height:1.45; margin:6px 2px 0; min-height:1px; word-break:break-all; }
+  .chmsg.bad{ color:var(--danger); font-weight:600; }
+  .chmsg.ok{ color:var(--muted); }
+  /* 실패하면 입력칸도 빨갛게 해서 바로 눈에 띄게 한다 */
+  #chInput.bad{ border-color:var(--danger); box-shadow:0 0 0 3px rgba(255,107,107,.18); }
   .addrow button{ padding:10px 13px; }
   .side-label{ font-size:12px; color:var(--muted); font-weight:600; margin:0 2px 8px; }
   #channels{ display:flex; flex-direction:column; gap:6px; max-height:66vh; overflow-y:auto; padding-right:4px; }
@@ -281,6 +287,7 @@ INDEX_HTML = r"""
         <input id="chInput" placeholder="채널 핸들 추가" />
         <button id="addBtn">추가</button>
       </div>
+      <div id="chMsg" class="chmsg"></div>
       <div class="side-label">등록 채널</div>
       <div id="channels"></div>
     </aside>
@@ -355,10 +362,26 @@ delListBtn.onclick = ()=>{
   fetch('/lists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',name:listSel.value})})
     .then(r=>r.json()).then(d=>{ fillLists(d); data={results:[]}; render(); loadChannels(); });
 };
+// 채널 추가 결과를 입력칸 아래에 알려준다.
+function chMsg(text, bad){
+  const el = document.getElementById('chMsg');
+  el.textContent = text || '';
+  el.className = bad ? 'chmsg bad' : 'chmsg ok';
+  chInput.classList.toggle('bad', !!bad);
+  if (text && !bad) setTimeout(()=>{ if(el.textContent===text) el.textContent=''; }, 2500);
+}
 function addChannel(){
   const c = chInput.value.trim(); if(!c) return;
+  chMsg('유튜브에 있는 채널인지 확인 중…', false);
+  addBtn.disabled = true;
   fetch('/channels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',channel:c})})
-    .then(r=>r.json()).then(d=>{channels=d.channels; renderChannels(); chInput.value='';});
+    .then(r=>r.json()).then(d=>{
+      channels = d.channels; renderChannels();
+      chMsg(d.msg || '', d.ok === false);
+      if (d.ok !== false) chInput.value = '';   // 실패하면 고쳐 쓸 수 있게 남겨 둔다
+    })
+    .catch(e=>chMsg('확인 실패: '+e.message, true))
+    .finally(()=>{ addBtn.disabled = false; });
 }
 function removeChannel(c){
   fetch('/channels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',channel:c})})
@@ -366,6 +389,10 @@ function removeChannel(c){
 }
 addBtn.onclick = addChannel;
 chInput.addEventListener('keydown', e=>{ if(e.key==='Enter') addChannel(); });
+// 고쳐 쓰기 시작하면 빨간 표시를 지운다
+chInput.addEventListener('input', ()=>{
+  if (chInput.classList.contains('bad')) chMsg('', false);
+});
 
 function cardHtml(v){
   const meta = encodeURIComponent(JSON.stringify({url:v.url, title:v.title, channel:v.channel||'', views:v.views||0}));
@@ -559,20 +586,60 @@ def index():
     return INDEX_HTML
 
 
+def channel_exists(handle):
+    """유튜브에 그 채널이 있는지 확인한다. (있음, 메시지) 를 돌려준다.
+
+    확인 자체가 안 되면(네트워크 문제 등) 막지 않고 통과시킨다.
+    잘못된 이유로 추가를 못 하게 하는 편이 더 불편하기 때문이다.
+    """
+    cmd = [
+        YT_DLP_PATH,
+        "--cookies-from-browser", f"{CHROME_BROWSER}:{CHROME_PROFILE}",
+        "--flat-playlist", "--dump-json", "--playlist-end", "1",
+        "--extractor-args", "youtubetab:skip=authcheck",
+        f"https://www.youtube.com/@{handle}/shorts",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return True, ""            # 느린 것뿐일 수 있다
+    except FileNotFoundError:
+        return True, ""            # yt-dlp 가 없으면 확인을 건너뛴다
+    err = proc.stderr or ""
+    if "Requested entity was not found" in err or "HTTP Error 404" in err:
+        return False, f"@{handle} 채널을 찾을 수 없습니다. 핸들을 다시 확인하세요."
+    if "This channel does not have a shorts tab" in err or "does not have a" in err:
+        return False, f"@{handle} 에 쇼츠 탭이 없습니다."
+    return True, ""
+
+
 @app.route("/channels", methods=["GET", "POST"])
 def channels_route():
     chs = load_channels()
+    msg = ""
+    ok = True
     if request.method == "POST":
         d = request.get_json()
         action = d.get("action")
         c = normalize_handle(d.get("channel") or "")
-        if action == "add" and c and c.lower() not in [x.lower() for x in chs]:
-            chs.append(c)
-            save_channels(chs)
+        if action == "add":
+            if not c:
+                ok, msg = False, "채널 핸들을 입력하세요."
+            elif c.lower() in [x.lower() for x in chs]:
+                ok, msg = False, f"@{c} 은(는) 이미 등록돼 있습니다."
+            else:
+                # 오타나 없는 채널을 걸러낸다
+                exists, why = channel_exists(c)
+                if not exists:
+                    ok, msg = False, why
+                else:
+                    chs.append(c)
+                    save_channels(chs)
+                    msg = f"@{c} 추가됨"
         elif action == "remove":
             chs = [x for x in chs if x.lower() != c.lower()]
             save_channels(chs)
-    return jsonify({"channels": chs})
+    return jsonify({"channels": chs, "ok": ok, "msg": msg})
 
 
 # 분석 대기열을 쌓아 두는 곳. 쓰는 사람마다 홈 폴더 아래에 생긴다.
