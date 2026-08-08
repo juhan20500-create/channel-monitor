@@ -4,6 +4,7 @@ import subprocess
 import time
 import traceback
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from threading import Timer
 
 from flask import Flask, request, jsonify, Response
@@ -221,6 +222,9 @@ INDEX_HTML = r"""
   .chip.bad{ color:var(--danger); border-color:var(--danger);
     background:rgba(255,107,107,.10); font-weight:600; }
   #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
+  .linkbtn{ float:right; background:none; border:none; box-shadow:none; padding:0;
+    color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; }
+  .linkbtn:hover{ color:var(--accent); }
   #status{ color:var(--accent); font-size:14px; margin-bottom:16px; min-height:18px; font-weight:600; }
   .chanblock{ margin-bottom:30px; }
   .chanhead{ font-size:16px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; gap:10px; }
@@ -292,7 +296,9 @@ INDEX_HTML = r"""
         <button id="addBtn">추가</button>
       </div>
       <div id="chMsg" class="chmsg"></div>
-      <div class="side-label">등록 채널</div>
+      <div class="side-label">등록 채널
+        <button id="verifyBtn" class="linkbtn">채널 검사</button>
+      </div>
       <div id="badCount"></div>
       <div id="channels"></div>
     </aside>
@@ -351,7 +357,31 @@ function renderChannels() {
   channelsEl.querySelectorAll('button').forEach(b => b.onclick = () => removeChannel(b.dataset.c));
   const n = channels.filter(c => badChannels[c.toLowerCase()]).length;
   const warn = document.getElementById('badCount');
-  if (warn) warn.textContent = n ? `빨간 채널 ${n}개는 핸들이 잘못돼 가져오지 못했습니다` : '';
+  // 검사 직후에는 그쪽 안내를 남겨 둔다
+  if (warn && n) warn.textContent = `빨간 채널 ${n}개는 핸들이 잘못됐습니다. ×로 지우고 다시 추가하세요`;
+}
+
+// 등록된 채널이 실제로 있는지 한꺼번에 검사한다. 가져오기를 돌리지 않아도 된다.
+function verifyChannels(){
+  const btn = document.getElementById('verifyBtn');
+  const warn = document.getElementById('badCount');
+  btn.disabled = true;
+  const old = btn.textContent; btn.textContent = '검사 중…';
+  warn.textContent = `채널 ${channels.length}개를 확인하고 있습니다…`;
+  fetch('/verify', {method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{
+      badChannels = {};
+      Object.entries(d.bad || {}).forEach(([k,v])=>{ badChannels[k.toLowerCase()] = v; });
+      localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
+      renderChannels();
+      const n = Object.keys(d.bad || {}).length;
+      warn.textContent = n
+        ? `빨간 채널 ${n}개는 핸들이 잘못됐습니다. ×로 지우고 다시 추가하세요`
+        : `채널 ${d.checked}개 모두 정상입니다`;
+    })
+    .catch(e=>{ warn.textContent = '검사 실패: ' + e.message; })
+    .finally(()=>{ btn.disabled = false; btn.textContent = old; });
 }
 
 // 가져오기 결과를 보고 어느 채널이 잘못됐는지 기록한다.
@@ -414,6 +444,7 @@ function removeChannel(c){
     .then(r=>r.json()).then(d=>{channels=d.channels; renderChannels();});
 }
 addBtn.onclick = addChannel;
+document.getElementById('verifyBtn').onclick = verifyChannels;
 chInput.addEventListener('keydown', e=>{ if(e.key==='Enter') addChannel(); });
 // 고쳐 쓰기 시작하면 빨간 표시를 지운다
 chInput.addEventListener('input', ()=>{
@@ -669,6 +700,27 @@ def channels_route():
             chs = [x for x in chs if x.lower() != c.lower()]
             save_channels(chs)
     return jsonify({"channels": chs, "ok": ok, "msg": msg})
+
+
+@app.route("/verify", methods=["POST"])
+def verify_channels():
+    """등록된 채널이 실제로 있는지 한꺼번에 확인한다.
+
+    영상은 안 받고 존재 여부만 보므로 가져오기보다 훨씬 빠르다.
+    여러 개를 동시에 확인한다.
+    """
+    chs = load_channels()
+    bad = {}
+
+    def one(h):
+        exists, why = channel_exists(h)
+        return h, (None if exists else (why or "채널을 찾을 수 없음"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for h, why in pool.map(one, chs):
+            if why:
+                bad[h] = why
+    return jsonify({"bad": bad, "checked": len(chs)})
 
 
 # 분석 대기열을 쌓아 두는 곳. 쓰는 사람마다 홈 폴더 아래에 생긴다.
