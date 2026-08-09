@@ -1,6 +1,3 @@
-# Copyright (c) 2026 juhan20500-create. All rights reserved.
-# 개인 사용만 허용. 재배포·공유·판매 금지. 자세한 내용은 LICENSE 참고.
-# Personal use only. Redistribution prohibited. See LICENSE.
 import json
 import os
 import subprocess
@@ -13,7 +10,33 @@ from threading import Timer
 from flask import Flask, request, jsonify, Response
 
 PORT = 5054
-YT_DLP_PATH = "yt-dlp"
+def _find_yt_dlp():
+    """yt-dlp 위치를 찾는다.
+
+    exe 로 묶어 배포하면 실행파일 안에 yt-dlp 가 함께 들어 있다.
+    그게 없으면 컴퓨터에 설치된 것을 쓴다.
+    """
+    import shutil
+    import sys
+    names = ("yt-dlp.exe", "yt-dlp") if os.name == "nt" else ("yt-dlp",)
+    # 1) PyInstaller 로 묶였을 때 풀리는 임시 폴더
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        for n in names:
+            p = os.path.join(base, n)
+            if os.path.exists(p):
+                return p
+    # 2) 실행파일과 같은 폴더
+    here = os.path.dirname(os.path.abspath(sys.executable if base else __file__))
+    for n in names:
+        p = os.path.join(here, n)
+        if os.path.exists(p):
+            return p
+    # 3) 컴퓨터에 설치된 것
+    return shutil.which("yt-dlp") or "yt-dlp"
+
+
+YT_DLP_PATH = _find_yt_dlp()
 CHROME_BROWSER = "chrome"
 CHROME_PROFILE = os.environ.get("YTDLP_CHROME_PROFILE", "Profile 2")
 PER_CHANNEL = 30         # 채널당 최근 쇼츠 표본 수 (조회수순 정렬해 인기순처럼 봄)
@@ -138,7 +161,7 @@ def fetch_channel(handle, limit=PER_CHANNEL):
     except subprocess.TimeoutExpired:
         error = "시간 초과"
     except FileNotFoundError:
-        error = "yt-dlp 없음"
+        error = "yt-dlp 를 찾을 수 없습니다 (설치 필요)"
     return videos, error
 
 
@@ -225,9 +248,10 @@ INDEX_HTML = r"""
   .chip.bad{ color:var(--danger); border-color:var(--danger);
     background:rgba(255,107,107,.10); font-weight:600; }
   #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
-  .linkbtn{ float:right; background:none; border:none; box-shadow:none; padding:0;
-    color:var(--muted); font-size:12px; text-decoration:underline; cursor:pointer; }
-  .linkbtn:hover{ color:var(--accent); }
+  .linkbtn{ float:right; background:var(--elev); border:1px solid var(--line); box-shadow:none;
+    padding:4px 10px; border-radius:999px; color:var(--txt); font-size:11.5px;
+    font-weight:600; cursor:pointer; margin-top:-3px; }
+  .linkbtn:hover{ border-color:var(--accent); color:var(--accent); }
   #status{ color:var(--accent); font-size:14px; margin-bottom:16px; min-height:18px; font-weight:600; }
   .chanblock{ margin-bottom:30px; }
   .chanhead{ font-size:16px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; gap:10px; }
@@ -398,7 +422,18 @@ function markBadChannels(results){
   localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
   renderChannels();
 }
-function loadChannels(){ fetch('/channels').then(r=>r.json()).then(d=>{channels=d.channels; renderChannels();}); }
+function loadChannels(){
+  fetch('/channels').then(r=>r.json()).then(d=>{
+    channels = d.channels; renderChannels();
+    // 아직 한 번도 검사하지 않은 목록이면 알아서 확인해 준다.
+    // (검사 결과는 남아 있으므로 다시 열 때는 그대로 쓴다)
+    const key = 'chanmon_checked_' + (channels.join(',') || '-');
+    if (channels.length && !sessionStorage.getItem(key)) {
+      sessionStorage.setItem(key, '1');
+      verifyChannels();
+    }
+  });
+}
 
 const listSel = document.getElementById('listSel');
 const newListBtn = document.getElementById('newListBtn');

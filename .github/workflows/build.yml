@@ -1,6 +1,7 @@
 name: build
 
 # 태그(v1.0 등)를 push하면 윈도우/맥 실행파일을 빌드해 Release에 첨부한다.
+# 실행파일 안에 yt-dlp 를 함께 넣어, 받는 사람이 따로 설치하지 않아도 되게 한다.
 on:
   push:
     tags:
@@ -18,10 +19,8 @@ jobs:
         include:
           - os: windows-latest
             artifact: channel-monitor-windows.exe
-            pyinstaller_name: channel-monitor
           - os: macos-latest
             artifact: channel-monitor-macos
-            pyinstaller_name: channel-monitor
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -33,13 +32,31 @@ jobs:
       - name: Install deps
         run: pip install flask pyinstaller
 
+      # 최신 yt-dlp 실행파일을 받아 함께 묶는다
+      - name: Fetch yt-dlp (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          curl -L -o yt-dlp.exe \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
+          ls -l yt-dlp.exe
+
+      - name: Fetch yt-dlp (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          curl -L -o yt-dlp \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
+          chmod +x yt-dlp
+          ls -l yt-dlp
+
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
-        run: pyinstaller --onefile --name channel-monitor chanmon_app.py
+        run: pyinstaller --onefile --name channel-monitor --add-binary "yt-dlp.exe;." chanmon_app.py
 
       - name: Build (macOS)
         if: matrix.os == 'macos-latest'
-        run: pyinstaller --onefile --name channel-monitor chanmon_app.py
+        run: pyinstaller --onefile --name channel-monitor --add-binary "yt-dlp:." chanmon_app.py
 
       - name: Rename artifact
         shell: bash
