@@ -1,3 +1,6 @@
+# Copyright (c) 2026 juhan20500-create. All rights reserved.
+# 개인 사용만 허용. 재배포·공유·판매 금지. 자세한 내용은 LICENSE 참고.
+# Personal use only. Redistribution prohibited. See LICENSE.
 import json
 import os
 import subprocess
