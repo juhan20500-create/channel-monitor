@@ -10,6 +10,55 @@ from threading import Timer
 from flask import Flask, request, jsonify, Response
 
 PORT = 5054
+
+
+def open_browser(url):
+    """크롬으로 연다. 크롬이 없으면 기본 브라우저로 연다.
+
+    APP_BROWSER 환경변수로 바꿀 수 있다. (chrome / edge / default)
+    """
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import webbrowser
+
+    want = (os.environ.get("APP_BROWSER") or "chrome").strip().lower()
+    if want == "default":
+        webbrowser.open(url)
+        return
+
+    if sys.platform == "darwin":
+        names = {"chrome": "Google Chrome", "edge": "Microsoft Edge"}
+        app = names.get(want)
+        if app and os.path.isdir(f"/Applications/{app}.app"):
+            subprocess.Popen(["open", "-a", app, url])
+            return
+    elif sys.platform == "win32":
+        cands = {
+            "chrome": [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            ],
+            "edge": [
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            ],
+        }.get(want, [])
+        for p in cands:
+            if os.path.exists(p):
+                subprocess.Popen([p, url])
+                return
+    else:
+        exe = shutil.which("google-chrome") or shutil.which("chromium")
+        if want == "chrome" and exe:
+            subprocess.Popen([exe, url])
+            return
+
+    webbrowser.open(url)   # 못 찾으면 기본 브라우저
+
+
 def _find_yt_dlp():
     """yt-dlp 위치를 찾는다.
 
@@ -861,5 +910,5 @@ def fetch_stream():
 
 
 if __name__ == "__main__":
-    (None if os.environ.get("NO_BROWSER") else Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start())
+    (None if os.environ.get("NO_BROWSER") else Timer(1.0, lambda: open_browser(f"http://127.0.0.1:{PORT}")).start())
     app.run(port=PORT, debug=False, threaded=True)
