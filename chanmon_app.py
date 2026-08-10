@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 import traceback
 import webbrowser
@@ -87,7 +88,46 @@ def _find_yt_dlp():
 
 YT_DLP_PATH = _find_yt_dlp()
 CHROME_BROWSER = "chrome"
-CHROME_PROFILE = os.environ.get("YTDLP_CHROME_PROFILE", "Profile 2")
+
+
+def _chrome_user_data_dir():
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "")
+        return os.path.join(base, "Google", "Chrome", "User Data")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    return os.path.expanduser("~/.config/google-chrome")
+
+
+def _pick_chrome_profile():
+    """이 컴퓨터에 실제로 있는 크롬 프로필을 고른다.
+
+    쿠키를 쓰면 유튜브 차단을 덜 겪는다. 다만 프로필 이름은 사람마다 달라서
+    (Default, Profile 1, …) 없는 이름을 쓰면 조회가 통째로 실패한다.
+    쓸 만한 프로필이 없으면 None 을 돌려주고, 쿠키 없이 조회한다.
+    """
+    want = os.environ.get("YTDLP_CHROME_PROFILE")
+    base = _chrome_user_data_dir()
+    if want:
+        return want
+    if not os.path.isdir(base):
+        return None
+    for name in ("Default", "Profile 1", "Profile 2", "Profile 3"):
+        if os.path.isdir(os.path.join(base, name)):
+            return name
+    return None
+
+
+CHROME_PROFILE = _pick_chrome_profile()
+
+
+def cookie_args():
+    """yt-dlp 에 넘길 쿠키 옵션. 쓸 프로필이 없으면 아무것도 넘기지 않는다."""
+    if not CHROME_PROFILE:
+        return []
+    return ["--cookies-from-browser", f"{CHROME_BROWSER}:{CHROME_PROFILE}"]
+
+
 PER_CHANNEL = 30         # 채널당 최근 쇼츠 표본 수 (조회수순 정렬해 인기순처럼 봄)
 MIN_VIEWS = 500_000      # 이 조회수 미만 쇼츠는 결과에서 제외
 FETCH_TIMEOUT = 60
@@ -170,7 +210,7 @@ def fetch_channel(handle, limit=PER_CHANNEL):
     url = f"https://www.youtube.com/@{handle}/shorts"
     cmd = [
         YT_DLP_PATH,
-        "--cookies-from-browser", f"{CHROME_BROWSER}:{CHROME_PROFILE}",
+        *cookie_args(),
         "--flat-playlist",
         "--dump-json",
         "--extractor-args", "youtubetab:skip=authcheck",
@@ -741,7 +781,7 @@ def channel_exists(handle):
     """
     cmd = [
         YT_DLP_PATH,
-        "--cookies-from-browser", f"{CHROME_BROWSER}:{CHROME_PROFILE}",
+        *cookie_args(),
         "--flat-playlist", "--dump-json", "--playlist-end", "1",
         "--extractor-args", "youtubetab:skip=authcheck",
         f"https://www.youtube.com/@{handle}/shorts",
@@ -909,6 +949,47 @@ def fetch_stream():
     return Response(gen(), mimetype="application/x-ndjson")
 
 
+def pick_port(start):
+    """이미 쓰는 포트면 다음 번호로 넘어간다. 안 그러면 프로그램이 그냥 꺼진다."""
+    import socket
+    for p in range(start, start + 20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                return p
+    return start
+
+
+def say(msg):
+    """윈도우 콘솔은 한글·기호에서 깨지며 멈출 수 있어 안전하게 출력한다."""
+    try:
+        print(msg)
+    except Exception:
+        try:
+            print(msg.encode("ascii", "replace").decode("ascii"))
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
-    (None if os.environ.get("NO_BROWSER") else Timer(1.0, lambda: open_browser(f"http://127.0.0.1:{PORT}")).start())
-    app.run(port=PORT, debug=False, threaded=True)
+    port = pick_port(PORT)
+    url = f"http://127.0.0.1:{port}"
+
+    def open_when_ready():
+        """서버가 실제로 응답할 때까지 기다렸다 연다. 너무 일찍 열면 연결 실패로 보인다."""
+        import socket
+        import time
+        for _ in range(60):          # 최대 30초
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.5)
+        open_browser(url)
+
+    if not os.environ.get("NO_BROWSER"):
+        Timer(0.3, open_when_ready).start()
+    say(f"채널 모니터 실행 중 -> {url}   (종료: Ctrl+C)")
+    try:
+        app.run(port=port, debug=False, threaded=True)
+    except Exception as e:
+        say(f"[오류] 실행하지 못했습니다: {type(e).__name__}: {e}")
+        input("엔터를 누르면 창이 닫힙니다...")
