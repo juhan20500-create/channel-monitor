@@ -99,33 +99,74 @@ def _chrome_user_data_dir():
     return os.path.expanduser("~/.config/google-chrome")
 
 
-def _pick_chrome_profile():
-    """이 컴퓨터에 실제로 있는 크롬 프로필을 고른다.
+def list_chrome_profiles():
+    """이 컴퓨터의 크롬 프로필 목록. 크롬이 저장해 둔 표시 이름까지 함께 준다.
 
-    쿠키를 쓰면 유튜브 차단을 덜 겪는다. 다만 프로필 이름은 사람마다 달라서
-    (Default, Profile 1, …) 없는 이름을 쓰면 조회가 통째로 실패한다.
-    쓸 만한 프로필이 없으면 None 을 돌려주고, 쿠키 없이 조회한다.
+    폴더 이름(Default, Profile 1 …)만 보여주면 어느 계정인지 알 수 없어서,
+    크롬의 Local State 에 있는 이름과 메일 주소를 같이 보여 준다.
+    """
+    base = _chrome_user_data_dir()
+    if not os.path.isdir(base):
+        return []
+    names = {}
+    try:
+        with open(os.path.join(base, "Local State"), encoding="utf-8") as f:
+            names = json.load(f).get("profile", {}).get("info_cache", {})
+    except (OSError, json.JSONDecodeError):
+        pass
+    out = []
+    for d in sorted(os.listdir(base)):
+        if d != "Default" and not d.startswith("Profile "):
+            continue
+        if not os.path.isdir(os.path.join(base, d, "Network")) and \
+           not os.path.exists(os.path.join(base, d, "Cookies")):
+            continue                      # 쿠키가 없는 껍데기 폴더는 뺀다
+        info = names.get(d) or {}
+        label = info.get("name") or d
+        mail = info.get("user_name") or ""
+        out.append({"id": d, "label": label, "mail": mail})
+    return out
+
+
+def settings_path():
+    return os.path.join(base_dir, "settings.json")
+
+
+def load_settings():
+    try:
+        with open(settings_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(d):
+    with open(settings_path(), "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+
+
+def _pick_chrome_profile():
+    """쓸 크롬 프로필을 정한다.
+
+    순서: 환경변수 → 화면에서 고른 값 → 이 컴퓨터에 있는 첫 프로필.
+    쓸 만한 게 없으면 None 을 돌려주고 쿠키 없이 조회한다.
     """
     want = os.environ.get("YTDLP_CHROME_PROFILE")
-    base = _chrome_user_data_dir()
     if want:
         return want
-    if not os.path.isdir(base):
-        return None
-    for name in ("Default", "Profile 1", "Profile 2", "Profile 3"):
-        if os.path.isdir(os.path.join(base, name)):
-            return name
-    return None
-
-
-CHROME_PROFILE = _pick_chrome_profile()
+    chosen = load_settings().get("chrome_profile")
+    avail = [p["id"] for p in list_chrome_profiles()]
+    if chosen and chosen in avail:
+        return chosen
+    return avail[0] if avail else None
 
 
 def cookie_args():
     """yt-dlp 에 넘길 쿠키 옵션. 쓸 프로필이 없으면 아무것도 넘기지 않는다."""
-    if not CHROME_PROFILE:
+    prof = _pick_chrome_profile()      # 화면에서 바꾸면 바로 반영되도록 매번 확인한다
+    if not prof:
         return []
-    return ["--cookies-from-browser", f"{CHROME_BROWSER}:{CHROME_PROFILE}"]
+    return ["--cookies-from-browser", f"{CHROME_BROWSER}:{prof}"]
 
 
 PER_CHANNEL = 30         # 채널당 최근 쇼츠 표본 수 (조회수순 정렬해 인기순처럼 봄)
@@ -358,6 +399,11 @@ INDEX_HTML = r"""
   .chip.bad{ color:var(--danger); border-color:var(--danger);
     background:rgba(255,107,107,.10); font-weight:600; }
   #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
+  /* 유튜브 로그인(크롬 프로필) 고르기 */
+  .prof-help{ font-size:12px; color:var(--muted); line-height:1.5; margin:4px 2px 8px; }
+  #profSel{ width:100%; background:var(--elev); border:1px solid var(--line); color:var(--txt);
+    border-radius:var(--ctrl); padding:9px 10px; font-size:13px; outline:none; }
+  #profSel:focus{ border-color:var(--accent); }
   .linkbtn{ float:right; background:var(--elev); border:1px solid var(--line); box-shadow:none;
     padding:4px 10px; border-radius:999px; color:var(--txt); font-size:11.5px;
     font-weight:600; cursor:pointer; margin-top:-3px; }
@@ -438,6 +484,15 @@ INDEX_HTML = r"""
       </div>
       <div id="badCount"></div>
       <div id="channels"></div>
+
+      <div class="side-label" style="margin-top:18px">유튜브 로그인
+        <button id="profToggle" class="linkbtn">설정</button>
+      </div>
+      <div id="profBox" hidden>
+        <div class="prof-help">잘 안 가져와지면, 유튜브에 로그인해 둔 크롬 계정을 고르세요.</div>
+        <select id="profSel"></select>
+        <div id="profMsg" class="chmsg"></div>
+      </div>
     </aside>
     <main>
       <div id="status"></div>
@@ -593,6 +648,46 @@ function removeChannel(c){
 }
 addBtn.onclick = addChannel;
 document.getElementById('verifyBtn').onclick = verifyChannels;
+
+// ---- 유튜브 로그인(크롬 프로필) 고르기 ----
+const profBox = document.getElementById('profBox');
+const profSel = document.getElementById('profSel');
+const profMsg = document.getElementById('profMsg');
+
+function loadProfiles(){
+  fetch('/profiles').then(r=>r.json()).then(d=>{
+    const list = d.profiles || [];
+    if(!list.length){
+      profSel.innerHTML = '<option value="">크롬을 찾지 못했습니다</option>';
+      profSel.disabled = true;
+      profMsg.className = 'chmsg ok';
+      profMsg.textContent = '쿠키 없이 가져옵니다. 유튜브가 막으면 크롬을 설치하세요.';
+      return;
+    }
+    profSel.disabled = !!d.locked;
+    profSel.innerHTML = list.map(p=>{
+      const who = p.mail ? `${p.label} (${p.mail})` : p.label;
+      return `<option value="${p.id}"${p.id===d.current?' selected':''}>${escapeHtml(who)}</option>`;
+    }).join('');
+    profMsg.className = 'chmsg ok';
+    profMsg.textContent = d.locked ? '환경변수로 고정돼 있어 바꿀 수 없습니다' : '';
+  }).catch(()=>{});
+}
+profSel.onchange = () => {
+  fetch('/profiles', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({profile: profSel.value})})
+    .then(r=>r.json()).then(()=>{
+      profMsg.className = 'chmsg ok';
+      profMsg.textContent = '바꿨습니다. 가져오기를 다시 해보세요.';
+      setTimeout(()=>{ profMsg.textContent=''; }, 3000);
+    })
+    .catch(()=>{ profMsg.className='chmsg bad'; profMsg.textContent='바꾸지 못했습니다'; });
+};
+document.getElementById('profToggle').onclick = () => {
+  profBox.hidden = !profBox.hidden;
+  document.getElementById('profToggle').textContent = profBox.hidden ? '설정' : '접기';
+  if(!profBox.hidden) loadProfiles();
+};
 chInput.addEventListener('keydown', e=>{ if(e.key==='Enter') addChannel(); });
 // 고쳐 쓰기 시작하면 빨간 표시를 지운다
 chInput.addEventListener('input', ()=>{
@@ -848,6 +943,29 @@ def channels_route():
             chs = [x for x in chs if x.lower() != c.lower()]
             save_channels(chs)
     return jsonify({"channels": chs, "ok": ok, "msg": msg})
+
+
+@app.route("/profiles", methods=["GET", "POST"])
+def profiles_route():
+    """쓸 크롬 프로필을 보여 주고 바꾼다.
+
+    유튜브가 로그인 안 된 접근을 자주 막는다. 로그인해 둔 프로필을 고르면
+    조회가 훨씬 잘 된다.
+    """
+    if request.method == "POST":
+        d = request.get_json() or {}
+        chosen = (d.get("profile") or "").strip()
+        s = load_settings()
+        if chosen:
+            s["chrome_profile"] = chosen
+        else:
+            s.pop("chrome_profile", None)      # 빈 값이면 자동 선택으로 되돌린다
+        save_settings(s)
+    return jsonify({
+        "profiles": list_chrome_profiles(),
+        "current": _pick_chrome_profile(),
+        "locked": bool(os.environ.get("YTDLP_CHROME_PROFILE")),
+    })
 
 
 @app.route("/verify", methods=["POST"])

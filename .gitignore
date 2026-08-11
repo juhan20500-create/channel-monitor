@@ -1,6 +1,7 @@
 # 개인 데이터 (배포에 포함하지 않음)
 lists.json
 channels.json
+settings.json
 analysis/
 *.log
 
