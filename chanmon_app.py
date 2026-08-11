@@ -246,6 +246,42 @@ def save_channels(channels):
     save_lists(data)
 
 
+COOKIE_FAIL_SIGNS = (
+    "could not copy chrome cookie database",   # 크롬이 켜져 있어 파일이 잠김 (윈도우에서 흔함)
+    "could not copy cookie database",
+    "could not find chrome cookies database",  # 프로필 이름이 안 맞음
+    "could not find cookies database",
+    "failed to decrypt",                       # 최신 크롬의 쿠키 암호화
+    "unable to read cookies",
+    "permission denied",
+    "cookies from browser",
+)
+
+
+def cookie_problem(err):
+    """쿠키를 못 읽어서 실패한 것인지 본다.
+
+    크롬이 켜져 있으면 쿠키 파일이 잠겨 읽지 못한다. 윈도우에서 흔하다.
+    이건 채널 문제가 아니므로, 쿠키 없이 다시 해보면 대개 된다.
+    """
+    e = (err or "").lower()
+    return any(s in e for s in COOKIE_FAIL_SIGNS)
+
+
+def run_ytdlp(args, timeout):
+    """yt-dlp 를 돌린다. 쿠키 때문에 실패하면 쿠키 없이 한 번 더 해본다.
+
+    (결과, 쿠키를 포기했는지) 를 돌려준다.
+    """
+    proc = subprocess.run([YT_DLP_PATH, *cookie_args(), *args],
+                          capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0 and cookie_args() and cookie_problem(proc.stderr):
+        retry = subprocess.run([YT_DLP_PATH, *args],
+                               capture_output=True, text=True, timeout=timeout)
+        return retry, True
+    return proc, False
+
+
 def classify_error(err, handle):
     """실패 원인을 구분한다.
 
@@ -273,8 +309,6 @@ def fetch_channel(handle, limit=PER_CHANNEL):
     """채널의 쇼츠 탭에서 영상 메타데이터를 가져온다. limit=None이면 전체(역대)."""
     url = f"https://www.youtube.com/@{handle}/shorts"
     cmd = [
-        YT_DLP_PATH,
-        *cookie_args(),
         "--flat-playlist",
         "--dump-json",
         "--extractor-args", "youtubetab:skip=authcheck",
@@ -286,7 +320,7 @@ def fetch_channel(handle, limit=PER_CHANNEL):
     error = None
     kind = None
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT)
+        proc, _ = run_ytdlp(cmd, FETCH_TIMEOUT)
         for line in proc.stdout.splitlines():
             line = line.strip()
             if not line:
@@ -993,14 +1027,12 @@ def channel_exists(handle):
     잘못된 이유로 추가를 못 하게 하는 편이 더 불편하기 때문이다.
     """
     cmd = [
-        YT_DLP_PATH,
-        *cookie_args(),
         "--flat-playlist", "--dump-json", "--playlist-end", "1",
         "--extractor-args", "youtubetab:skip=authcheck",
         f"https://www.youtube.com/@{handle}/shorts",
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc, _ = run_ytdlp(cmd, 30)
     except subprocess.TimeoutExpired:
         return True, "", None      # 느린 것뿐일 수 있다
     except FileNotFoundError:
@@ -1053,7 +1085,6 @@ def diag():
     if not handle:
         return jsonify({"ok": False, "msg": "채널 핸들을 입력하세요."})
     cmd = [
-        YT_DLP_PATH, *cookie_args(),
         "--flat-playlist", "--dump-json", "--playlist-end", "3",
         "--extractor-args", "youtubetab:skip=authcheck",
         f"https://www.youtube.com/@{handle}/shorts",
@@ -1065,7 +1096,7 @@ def diag():
         "os": sys.platform,
     }
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT)
+        p, dropped = run_ytdlp(cmd, FETCH_TIMEOUT)
     except FileNotFoundError:
         info["result"] = "yt-dlp 를 찾지 못했습니다"
         return jsonify({"ok": False, "info": info, "log": ""})
@@ -1075,6 +1106,8 @@ def diag():
 
     got = len([x for x in p.stdout.splitlines() if x.strip()])
     info["returncode"] = p.returncode
+    if dropped:
+        info["cookie"] = "쿠키를 못 읽어 쿠키 없이 조회했습니다 (크롬이 켜져 있으면 생깁니다)"
     info["videos_found"] = got
     info["result"] = "정상" if got else "가져오지 못함"
     # yt-dlp 버전도 같이 (오래된 버전이 원인인 경우가 많다)
