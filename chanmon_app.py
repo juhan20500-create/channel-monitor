@@ -598,7 +598,17 @@ function fmtViews(v){
 }
 
 // 가져오기에서 실패한 채널. 핸들이 틀렸을 가능성이 커서 빨갛게 표시한다.
-let badChannels = JSON.parse(localStorage.getItem('chanmon_bad') || '{}');
+// 예전 버전이 저장해 둔 기록은 믿을 수 없다. 형식이 맞고 "고쳐야 하는 것"만 남긴다.
+// (잠깐 실패한 것까지 남으면 이미 해결된 채널이 계속 표시된다)
+let badChannels = (() => {
+  let raw = {};
+  try { raw = JSON.parse(localStorage.getItem('chanmon_bad') || '{}'); } catch(e) {}
+  const keep = {};
+  Object.entries(raw).forEach(([k, v]) => {
+    if (v && typeof v === 'object' && v.kind === 'missing' && v.msg) keep[k] = v;
+  });
+  return keep;
+})();
 
 function renderChannels() {
   channelsEl.innerHTML = channels.map(c => {
@@ -634,7 +644,7 @@ function verifyChannels(){
     .then(d=>{
       badChannels = {};
       Object.entries(d.bad || {}).forEach(([k,v])=>{
-        badChannels[k.toLowerCase()] = (typeof v === 'string') ? {msg:v, kind:'temp'} : v;
+        badChannels[k.toLowerCase()] = v;   // 서버는 항상 {msg, kind} 로 준다
       });
       saveBad();
       renderChannels();
