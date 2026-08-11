@@ -951,7 +951,7 @@ def channels_route():
                 ok, msg = False, f"@{c} 은(는) 이미 등록돼 있습니다."
             else:
                 # 오타나 없는 채널을 걸러낸다
-                exists, why = channel_exists(c)
+                exists, why, _ = channel_exists(c)
                 if not exists:
                     ok, msg = False, why
                 else:
