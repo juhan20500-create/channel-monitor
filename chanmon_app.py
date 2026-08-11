@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -305,6 +306,68 @@ def classify_error(err, handle):
     return "가져오지 못했습니다 — 잠시 후 다시", "temp"
 
 
+HANGUL = re.compile(r"[가-힣]")
+
+
+def video_language(vid):
+    """영상 하나를 직접 조회해 원래 언어를 알아낸다 ('ko', 'en' …).
+
+    목록만 봐서는 그 채널이 한국 것인지 외국 것인지 알 수 없다.
+    한국 채널이 영어 제목을 같이 달아둔 것과, 미국 채널이 한국어 제목을
+    같이 달아둔 것이 목록에서는 똑같아 보이기 때문이다.
+    영상 하나를 직접 열어보면 원래 언어가 그대로 적혀 있다.
+
+    알아내지 못하면 None. 그때는 지금까지처럼 두고 건드리지 않는다.
+    """
+    cmd = ["--skip-download", "--dump-json",
+           f"https://www.youtube.com/watch?v={vid}"]
+    try:
+        proc, _ = run_ytdlp(cmd, 60)
+        line = proc.stdout.strip()
+        if line:
+            return (json.loads(line).get("language") or "").lower() or None
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def korean_titles(handle, limit):
+    """같은 채널을 한국어로 한 번 더 받아 '영상번호 → 한국어 제목' 을 만든다.
+
+    한국어로 달라고 하면 제목은 한국어로 오지만 조회수가 통째로 빠진다
+    (유튜브가 '조회수 1.4천회' 같은 글로 내주는데 숫자로 읽히지 않는다).
+    그래서 조회수는 원래대로 받고, 제목만 여기서 가져와 갈아끼운다.
+
+    실패하면 빈 것을 돌려준다. 제목이 영어로 남을 뿐 목록은 그대로 나온다.
+    """
+    cmd = [
+        "--flat-playlist",
+        "--dump-json",
+        "--extractor-args", "youtubetab:skip=authcheck",
+        "--extractor-args", "youtube:lang=ko",
+    ]
+    if limit:
+        cmd += ["--playlist-end", str(limit)]
+    cmd.append(f"https://www.youtube.com/@{handle}/shorts")
+    titles = {}
+    try:
+        proc, _ = run_ytdlp(cmd, FETCH_TIMEOUT)
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            vid, title = d.get("id"), d.get("title")
+            if vid and title:
+                titles[vid] = title
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return titles
+
+
 def fetch_channel(handle, limit=PER_CHANNEL):
     """채널의 쇼츠 탭에서 영상 메타데이터를 가져온다. limit=None이면 전체(역대)."""
     url = f"https://www.youtube.com/@{handle}/shorts"
@@ -344,6 +407,18 @@ def fetch_channel(handle, limit=PER_CHANNEL):
                 "url": f"https://www.youtube.com/watch?v={vid}",
             })
         videos.sort(key=lambda v: v["views"], reverse=True)  # 조회수순(인기순)
+        # 제목은 그 영상을 만든 사람의 언어로 보여준다.
+        # 한국 채널이면 한글, 미국 채널이면 영어 그대로.
+        #
+        # 유튜브는 채널 주인이 올려둔 번역 제목이 있으면 그쪽을 먼저 내준다.
+        # 그래서 한국 영상이 영어 제목으로 오기도 하고, 그 반대도 있다.
+        # 영어가 섞여 있을 때만, 영상 하나를 열어 원래 언어를 확인한 뒤
+        # 한국 채널로 밝혀진 경우에만 한글 제목으로 바꾼다.
+        odd = next((v for v in videos if not HANGUL.search(v["title"])), None)
+        if odd and (video_language(odd["id"]) or "").startswith("ko"):
+            ko = korean_titles(handle, limit)
+            for v in videos:
+                v["title"] = ko.get(v["id"], v["title"])
         if not videos and proc.returncode != 0:
             error, kind = classify_error(proc.stderr or "", handle)
     except subprocess.TimeoutExpired:
