@@ -410,6 +410,10 @@ INDEX_HTML = r"""
   #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
   /* 유튜브 로그인(크롬 프로필) 고르기 */
   .prof-help{ font-size:12px; color:var(--muted); line-height:1.5; margin:4px 2px 8px; }
+  /* 진단 결과 — 그대로 복사해 보낼 수 있게 */
+  #diagOut{ background:#0a0c10; border:1px solid var(--line); border-radius:var(--ctrl);
+    padding:10px; font-size:11px; line-height:1.5; color:var(--txt);
+    white-space:pre-wrap; word-break:break-all; max-height:260px; overflow:auto; margin:8px 0 6px; }
   #profSel{ width:100%; background:var(--elev); border:1px solid var(--line); color:var(--txt);
     border-radius:var(--ctrl); padding:9px 10px; font-size:13px; outline:none; }
   #profSel:focus{ border-color:var(--accent); }
@@ -493,6 +497,20 @@ INDEX_HTML = r"""
       </div>
       <div id="badCount"></div>
       <div id="channels"></div>
+
+      <div class="side-label" style="margin-top:18px">문제 확인
+        <button id="diagToggle" class="linkbtn">진단</button>
+      </div>
+      <div id="diagBox" hidden>
+        <div class="prof-help">안 되는 채널 핸들을 넣고 <b>진단</b>을 누르면,
+          무엇 때문에 실패했는지 그대로 보여 줍니다. 그 내용을 그대로 알려 주세요.</div>
+        <div class="addrow">
+          <input id="diagInput" placeholder="예: kickbada" />
+          <button id="diagRun">진단</button>
+        </div>
+        <pre id="diagOut" hidden></pre>
+        <button id="diagCopy" class="linkbtn" hidden>결과 복사</button>
+      </div>
 
       <div class="side-label" style="margin-top:18px">유튜브 로그인
         <button id="profToggle" class="linkbtn">설정</button>
@@ -584,7 +602,7 @@ function verifyChannels(){
       Object.entries(d.bad || {}).forEach(([k,v])=>{
         badChannels[k.toLowerCase()] = (typeof v === 'string') ? {msg:v, kind:'temp'} : v;
       });
-      localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
+      saveBad();
       renderChannels();
       const n = Object.keys(d.bad || {}).length;
       warn.textContent = n
@@ -603,8 +621,19 @@ function markBadChannels(results){
     if (r.error) badChannels[k] = {msg: r.error, kind: r.kind || 'temp'};
     else delete badChannels[k];        // 이제 잘 되면 표시를 지운다
   });
-  localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
+  saveBad();
   renderChannels();
+}
+
+// 잠깐 실패한 것(노랑)은 다음에 열 때까지 남길 이유가 없다.
+// 그대로 두면 이미 해결된 채널이 계속 노랑으로 보인다.
+// 고쳐야 하는 것(빨강)만 저장한다.
+function saveBad(){
+  const keep = {};
+  Object.entries(badChannels).forEach(([k, v]) => {
+    if (v && (v.kind || 'temp') === 'missing') keep[k] = v;
+  });
+  localStorage.setItem('chanmon_bad', JSON.stringify(keep));
 }
 function loadChannels(){
   fetch('/channels').then(r=>r.json()).then(d=>{
@@ -667,6 +696,55 @@ function removeChannel(c){
 }
 addBtn.onclick = addChannel;
 document.getElementById('verifyBtn').onclick = verifyChannels;
+
+// ---- 문제 확인(진단) ----
+// 받은 사람 컴퓨터에서 왜 안 되는지는 추측으로 알 수 없다.
+// 실제 오류를 그대로 보여 주고, 복사해서 보낼 수 있게 한다.
+const diagOut = document.getElementById('diagOut');
+const diagCopy = document.getElementById('diagCopy');
+
+function runDiag(){
+  const h = document.getElementById('diagInput').value.trim();
+  if(!h){ alert('채널 핸들을 입력하세요.'); return; }
+  const btn = document.getElementById('diagRun');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '확인 중…';
+  diagOut.hidden = false; diagCopy.hidden = true;
+  diagOut.textContent = '확인하고 있습니다…';
+  fetch('/diag', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({channel: h})})
+    .then(r=>r.json())
+    .then(d=>{
+      const i = d.info || {};
+      const lines = [
+        `채널      : @${i.handle || h}`,
+        `결과      : ${i.result || '?'}`,
+        `찾은 영상 : ${i.videos_found ?? '-'}`,
+        `크롬 계정 : ${i.profile || '-'}`,
+        `yt-dlp    : ${i.yt_dlp_version || '?'}`,
+        `운영체제  : ${i.os || '-'}`,
+      ];
+      if (d.log) lines.push('', '--- 오류 내용 ---', d.log);
+      diagOut.textContent = lines.join('\n');
+      diagCopy.hidden = false;
+    })
+    .catch(e=>{ diagOut.textContent = '진단 실패: ' + e.message; })
+    .finally(()=>{ btn.disabled = false; btn.textContent = old; });
+}
+document.getElementById('diagRun').onclick = runDiag;
+document.getElementById('diagInput').addEventListener('keydown', e=>{
+  if(e.key === 'Enter') runDiag();
+});
+diagCopy.onclick = () => {
+  navigator.clipboard.writeText(diagOut.textContent).then(()=>{
+    diagCopy.textContent = '복사했습니다';
+    setTimeout(()=>diagCopy.textContent = '결과 복사', 1600);
+  }).catch(()=>{});
+};
+document.getElementById('diagToggle').onclick = () => {
+  const b = document.getElementById('diagBox');
+  b.hidden = !b.hidden;
+  document.getElementById('diagToggle').textContent = b.hidden ? '진단' : '접기';
+};
 
 // ---- 유튜브 로그인(크롬 프로필) 고르기 ----
 const profBox = document.getElementById('profBox');
@@ -962,6 +1040,52 @@ def channels_route():
             chs = [x for x in chs if x.lower() != c.lower()]
             save_channels(chs)
     return jsonify({"channels": chs, "ok": ok, "msg": msg})
+
+
+@app.route("/diag", methods=["POST"])
+def diag():
+    """한 채널을 조회해 보고 실제로 무슨 일이 있었는지 그대로 보여 준다.
+
+    받은 사람 컴퓨터에서 왜 안 되는지 알려면 추측 말고 이 내용이 필요하다.
+    """
+    d = request.get_json() or {}
+    handle = normalize_handle(d.get("channel") or "")
+    if not handle:
+        return jsonify({"ok": False, "msg": "채널 핸들을 입력하세요."})
+    cmd = [
+        YT_DLP_PATH, *cookie_args(),
+        "--flat-playlist", "--dump-json", "--playlist-end", "3",
+        "--extractor-args", "youtubetab:skip=authcheck",
+        f"https://www.youtube.com/@{handle}/shorts",
+    ]
+    info = {
+        "handle": handle,
+        "yt_dlp": YT_DLP_PATH,
+        "profile": _pick_chrome_profile() or "(쿠키 없음)",
+        "os": sys.platform,
+    }
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT)
+    except FileNotFoundError:
+        info["result"] = "yt-dlp 를 찾지 못했습니다"
+        return jsonify({"ok": False, "info": info, "log": ""})
+    except subprocess.TimeoutExpired:
+        info["result"] = "시간 초과"
+        return jsonify({"ok": False, "info": info, "log": ""})
+
+    got = len([x for x in p.stdout.splitlines() if x.strip()])
+    info["returncode"] = p.returncode
+    info["videos_found"] = got
+    info["result"] = "정상" if got else "가져오지 못함"
+    # yt-dlp 버전도 같이 (오래된 버전이 원인인 경우가 많다)
+    try:
+        info["yt_dlp_version"] = subprocess.run(
+            [YT_DLP_PATH, "--version"], capture_output=True, text=True, timeout=20
+        ).stdout.strip()
+    except Exception:
+        info["yt_dlp_version"] = "?"
+    return jsonify({"ok": bool(got), "info": info,
+                    "log": (p.stderr or "").strip()[-4000:]})
 
 
 @app.route("/profiles", methods=["GET", "POST"])
