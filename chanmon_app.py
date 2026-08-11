@@ -254,17 +254,19 @@ def classify_error(err, handle):
     핸들이 틀렸다고 단정하는 건 유튜브가 "없다"고 답한 경우뿐이다.
     """
     e = err.lower()
+    # 404 는 그 채널이 없다는 뜻. 고쳐야 하는 문제다.
     if "requested entity was not found" in e or "http error 404" in e:
-        return f"@{handle} 채널이 없습니다 (핸들 확인 필요)"
+        return f"@{handle} 채널이 없습니다 — 핸들을 고치거나 지우세요", "missing"
     if "does not have a" in e and "shorts" in e:
-        return "이 채널에는 쇼츠가 없습니다"
+        return "이 채널에는 쇼츠가 없습니다", "missing"
+    # 아래는 채널 잘못이 아니라 그때그때 사정. 다시 하면 될 수 있다.
     if "sign in" in e or "cookies" in e or "bot" in e or "consent" in e:
-        return "유튜브가 확인을 요구했습니다 (크롬에서 유튜브 로그인 후 다시 시도)"
+        return "유튜브가 확인을 요구했습니다 — 아래에서 크롬 계정을 바꿔보세요", "temp"
     if "429" in e or "too many requests" in e:
-        return "요청이 많아 잠시 막혔습니다 (잠시 후 다시 시도)"
+        return "요청이 많아 잠시 막혔습니다 — 잠시 후 다시", "temp"
     if "unable to download" in e or "urlopen" in e or "timed out" in e or "network" in e:
-        return "인터넷 연결 문제로 가져오지 못했습니다"
-    return "가져오지 못했습니다 (잠시 후 다시 시도)"
+        return "인터넷 연결 문제 — 잠시 후 다시", "temp"
+    return "가져오지 못했습니다 — 잠시 후 다시", "temp"
 
 
 def fetch_channel(handle, limit=PER_CHANNEL):
@@ -282,6 +284,7 @@ def fetch_channel(handle, limit=PER_CHANNEL):
     cmd.append(url)
     videos = []
     error = None
+    kind = None
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT)
         for line in proc.stdout.splitlines():
@@ -308,12 +311,12 @@ def fetch_channel(handle, limit=PER_CHANNEL):
             })
         videos.sort(key=lambda v: v["views"], reverse=True)  # 조회수순(인기순)
         if not videos and proc.returncode != 0:
-            error = classify_error(proc.stderr or "", handle)
+            error, kind = classify_error(proc.stderr or "", handle)
     except subprocess.TimeoutExpired:
-        error = "시간 초과"
+        error, kind = "시간 초과 — 잠시 후 다시", "temp"
     except FileNotFoundError:
-        error = "yt-dlp 를 찾을 수 없습니다 (설치 필요)"
-    return videos, error
+        error, kind = "yt-dlp 를 찾을 수 없습니다 (설치 필요)", "temp"
+    return videos, error, kind
 
 
 INDEX_HTML = r"""
@@ -395,9 +398,15 @@ INDEX_HTML = r"""
   #channels{ max-height:none; }
   .chip button{ background:none; color:var(--muted); border:none; cursor:pointer; font-size:14px; padding:0; box-shadow:none; }
   .chip button:hover{ color:var(--danger); }
-  /* 가져오지 못한 채널 — 원인은 마우스를 올리면 나온다 */
+  /* 가져오지 못한 채널.
+     빨강 = 없는 채널(고쳐야 함), 노랑 = 잠깐 실패(다시 하면 될 수 있음) */
+  .chip .chname{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .chip .why{ font-style:normal; font-size:11px; font-weight:400; opacity:.9;
+    line-height:1.35; white-space:normal; }
   .chip.bad{ color:var(--danger); border-color:var(--danger);
-    background:rgba(255,107,107,.10); font-weight:600; }
+    background:rgba(255,107,107,.10); font-weight:600; align-items:flex-start; }
+  .chip.warn{ color:#ffb454; border-color:#ffb454;
+    background:rgba(255,180,84,.10); font-weight:600; align-items:flex-start; }
   #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
   /* 유튜브 로그인(크롬 프로필) 고르기 */
   .prof-help{ font-size:12px; color:var(--muted); line-height:1.5; margin:4px 2px 8px; }
@@ -541,16 +550,24 @@ let badChannels = JSON.parse(localStorage.getItem('chanmon_bad') || '{}');
 
 function renderChannels() {
   channelsEl.innerHTML = channels.map(c => {
-    const why = badChannels[c.toLowerCase()];
-    const cls = why ? 'chip bad' : 'chip';
-    const tip = why ? ` title="${escapeHtml(why)}"` : '';
-    return `<span class="${cls}"${tip}>${escapeHtml(c)}<button data-c="${escapeHtml(c)}">×</button></span>`;
+    const b = badChannels[c.toLowerCase()];
+    const kind = b && (b.kind || 'temp');
+    const cls = 'chip' + (kind === 'missing' ? ' bad' : kind ? ' warn' : '');
+    const reason = b ? `<em class="why">${escapeHtml(b.msg || b)}</em>` : '';
+    return `<span class="${cls}"><span class="chname">${escapeHtml(c)}${reason}</span>` +
+           `<button data-c="${escapeHtml(c)}">×</button></span>`;
   }).join('');
   channelsEl.querySelectorAll('button').forEach(b => b.onclick = () => removeChannel(b.dataset.c));
-  const n = channels.filter(c => badChannels[c.toLowerCase()]).length;
+  const bads = channels.map(c => badChannels[c.toLowerCase()]).filter(Boolean);
+  const miss = bads.filter(b => (b.kind || 'temp') === 'missing').length;
+  const temp = bads.length - miss;
   const warn = document.getElementById('badCount');
-  // 검사 직후에는 그쪽 안내를 남겨 둔다
-  if (warn && n) warn.textContent = `빨간 채널 ${n}개를 가져오지 못했습니다. 마우스를 올리면 이유가 나옵니다`;
+  if (warn && bads.length) {
+    const parts = [];
+    if (miss) parts.push(`빨강 ${miss}개는 없는 채널 — 고치거나 지우세요`);
+    if (temp) parts.push(`노랑 ${temp}개는 잠깐 실패 — 다시 해보세요`);
+    warn.textContent = parts.join(' · ');
+  }
 }
 
 // 등록된 채널이 실제로 있는지 한꺼번에 검사한다. 가져오기를 돌리지 않아도 된다.
@@ -564,12 +581,14 @@ function verifyChannels(){
     .then(r=>r.json())
     .then(d=>{
       badChannels = {};
-      Object.entries(d.bad || {}).forEach(([k,v])=>{ badChannels[k.toLowerCase()] = v; });
+      Object.entries(d.bad || {}).forEach(([k,v])=>{
+        badChannels[k.toLowerCase()] = (typeof v === 'string') ? {msg:v, kind:'temp'} : v;
+      });
       localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
       renderChannels();
       const n = Object.keys(d.bad || {}).length;
       warn.textContent = n
-        ? `빨간 채널 ${n}개를 가져오지 못했습니다. 마우스를 올리면 이유가 나옵니다`
+        ? `${n}개를 가져오지 못했습니다`
         : `채널 ${d.checked}개 모두 정상입니다`;
     })
     .catch(e=>{ warn.textContent = '검사 실패: ' + e.message; })
@@ -581,7 +600,7 @@ function markBadChannels(results){
   (results || []).forEach(r => {
     const k = (r.channel || '').toLowerCase();
     if (!k) return;
-    if (r.error) badChannels[k] = r.error;
+    if (r.error) badChannels[k] = {msg: r.error, kind: r.kind || 'temp'};
     else delete badChannels[k];        // 이제 잘 되면 표시를 지운다
   });
   localStorage.setItem('chanmon_bad', JSON.stringify(badChannels));
@@ -905,15 +924,15 @@ def channel_exists(handle):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
-        return True, ""            # 느린 것뿐일 수 있다
+        return True, "", None      # 느린 것뿐일 수 있다
     except FileNotFoundError:
-        return True, ""            # yt-dlp 가 없으면 확인을 건너뛴다
+        return True, "", None      # yt-dlp 가 없으면 확인을 건너뛴다
     err = proc.stderr or ""
     if "Requested entity was not found" in err or "HTTP Error 404" in err:
-        return False, f"@{handle} 채널을 찾을 수 없습니다. 핸들을 다시 확인하세요."
+        return False, f"@{handle} 채널이 없습니다 — 핸들을 고치거나 지우세요", "missing"
     if "This channel does not have a shorts tab" in err or "does not have a" in err:
-        return False, f"@{handle} 에 쇼츠 탭이 없습니다."
-    return True, ""
+        return False, f"@{handle} 에 쇼츠 탭이 없습니다", "missing"
+    return True, "", None
 
 
 @app.route("/channels", methods=["GET", "POST"])
@@ -979,13 +998,13 @@ def verify_channels():
     bad = {}
 
     def one(h):
-        exists, why = channel_exists(h)
-        return h, (None if exists else (why or "채널을 찾을 수 없음"))
+        exists, why, kind = channel_exists(h)
+        return h, (None if exists else (why or "채널을 찾을 수 없음")), kind
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for h, why in pool.map(one, chs):
+        for h, why, kind in pool.map(one, chs):
             if why:
-                bad[h] = why
+                bad[h] = {"msg": why, "kind": kind or "temp"}
     return jsonify({"bad": bad, "checked": len(chs)})
 
 
@@ -1076,12 +1095,13 @@ def fetch_stream():
             if i > 0:
                 time.sleep(DELAY_BETWEEN)
             try:
-                videos, error = fetch_channel(handle, limit)
+                videos, error, kind = fetch_channel(handle, limit)
             except Exception as e:
                 log_error(f"fetch {handle}")
-                videos, error = [], f"{type(e).__name__}"
+                videos, error, kind = [], f"{type(e).__name__}", "temp"
             yield json.dumps(
-                {"channel": handle, "videos": videos, "error": error},
+                {"channel": handle, "videos": videos, "error": error,
+                 "kind": kind},
                 ensure_ascii=False,
             ) + "\n"
 
