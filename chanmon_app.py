@@ -205,6 +205,27 @@ def save_channels(channels):
     save_lists(data)
 
 
+def classify_error(err, handle):
+    """실패 원인을 구분한다.
+
+    전에는 실패하면 무조건 "핸들이 잘못됐다"고 알렸다. 그러다 보니
+    네트워크 문제나 유튜브 차단으로 실패한 것까지 멀쩡한 채널을 지우게 만들었다.
+    핸들이 틀렸다고 단정하는 건 유튜브가 "없다"고 답한 경우뿐이다.
+    """
+    e = err.lower()
+    if "requested entity was not found" in e or "http error 404" in e:
+        return f"@{handle} 채널이 없습니다 (핸들 확인 필요)"
+    if "does not have a" in e and "shorts" in e:
+        return "이 채널에는 쇼츠가 없습니다"
+    if "sign in" in e or "cookies" in e or "bot" in e or "consent" in e:
+        return "유튜브가 확인을 요구했습니다 (크롬에서 유튜브 로그인 후 다시 시도)"
+    if "429" in e or "too many requests" in e:
+        return "요청이 많아 잠시 막혔습니다 (잠시 후 다시 시도)"
+    if "unable to download" in e or "urlopen" in e or "timed out" in e or "network" in e:
+        return "인터넷 연결 문제로 가져오지 못했습니다"
+    return "가져오지 못했습니다 (잠시 후 다시 시도)"
+
+
 def fetch_channel(handle, limit=PER_CHANNEL):
     """채널의 쇼츠 탭에서 영상 메타데이터를 가져온다. limit=None이면 전체(역대)."""
     url = f"https://www.youtube.com/@{handle}/shorts"
@@ -246,7 +267,7 @@ def fetch_channel(handle, limit=PER_CHANNEL):
             })
         videos.sort(key=lambda v: v["views"], reverse=True)  # 조회수순(인기순)
         if not videos and proc.returncode != 0:
-            error = "채널을 찾을 수 없음 (핸들 확인 필요)"
+            error = classify_error(proc.stderr or "", handle)
     except subprocess.TimeoutExpired:
         error = "시간 초과"
     except FileNotFoundError:
@@ -333,7 +354,7 @@ INDEX_HTML = r"""
   #channels{ max-height:none; }
   .chip button{ background:none; color:var(--muted); border:none; cursor:pointer; font-size:14px; padding:0; box-shadow:none; }
   .chip button:hover{ color:var(--danger); }
-  /* 핸들이 잘못돼 가져오지 못한 채널 — 직접 고치도록 눈에 띄게 둔다 */
+  /* 가져오지 못한 채널 — 원인은 마우스를 올리면 나온다 */
   .chip.bad{ color:var(--danger); border-color:var(--danger);
     background:rgba(255,107,107,.10); font-weight:600; }
   #badCount{ font-size:12px; color:var(--danger); line-height:1.45; margin:6px 2px 0; }
@@ -467,14 +488,14 @@ function renderChannels() {
   channelsEl.innerHTML = channels.map(c => {
     const why = badChannels[c.toLowerCase()];
     const cls = why ? 'chip bad' : 'chip';
-    const tip = why ? ` title="${escapeHtml(why)} — 핸들을 고쳐 주세요"` : '';
+    const tip = why ? ` title="${escapeHtml(why)}"` : '';
     return `<span class="${cls}"${tip}>${escapeHtml(c)}<button data-c="${escapeHtml(c)}">×</button></span>`;
   }).join('');
   channelsEl.querySelectorAll('button').forEach(b => b.onclick = () => removeChannel(b.dataset.c));
   const n = channels.filter(c => badChannels[c.toLowerCase()]).length;
   const warn = document.getElementById('badCount');
   // 검사 직후에는 그쪽 안내를 남겨 둔다
-  if (warn && n) warn.textContent = `빨간 채널 ${n}개는 핸들이 잘못됐습니다. ×로 지우고 다시 추가하세요`;
+  if (warn && n) warn.textContent = `빨간 채널 ${n}개를 가져오지 못했습니다. 마우스를 올리면 이유가 나옵니다`;
 }
 
 // 등록된 채널이 실제로 있는지 한꺼번에 검사한다. 가져오기를 돌리지 않아도 된다.
@@ -493,7 +514,7 @@ function verifyChannels(){
       renderChannels();
       const n = Object.keys(d.bad || {}).length;
       warn.textContent = n
-        ? `빨간 채널 ${n}개는 핸들이 잘못됐습니다. ×로 지우고 다시 추가하세요`
+        ? `빨간 채널 ${n}개를 가져오지 못했습니다. 마우스를 올리면 이유가 나옵니다`
         : `채널 ${d.checked}개 모두 정상입니다`;
     })
     .catch(e=>{ warn.textContent = '검사 실패: ' + e.message; })
